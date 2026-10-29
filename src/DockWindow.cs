@@ -25,8 +25,8 @@ namespace MacUI
 
         public Grid View;
         public TranslateTransform Bounce;
+        public ScaleTransform Grow;
         public UIElement Dot;
-        public double Size, TargetSize, BaseCenter;
 
         public bool IsApp { get { return Kind == "app"; } }
         public bool IsRunning { get { return Windows.Count > 0; } }
@@ -55,7 +55,7 @@ namespace MacUI
     // It hides itself and slides up when the mouse touches the bottom of the screen.
     internal sealed class DockWindow : Window
     {
-        const double BaseSize = 48, MaxSize = 76, Spacing = 6, Pad = 7, BottomGap = 6, Range = 160, SepWidth = 13;
+        const double BaseSize = 48, HoverScale = 1.35, HoverSize = BaseSize * HoverScale, Spacing = 6, Pad = 7, BottomGap = 6, SepWidth = 13;
         const double HiddenOffset = BaseSize + Pad * 2 + BottomGap + 12;
         const string RecycleBin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
 
@@ -82,8 +82,6 @@ namespace MacUI
         List<DockItem> pinned = new List<DockItem>();
         List<DockItem> entries = new List<DockItem>();
         DockItem hovered;
-        double totalBaseWidth;
-        bool animating;
         bool revealed = true;
         bool menuOpen;
         IntPtr hwnd;
@@ -114,13 +112,14 @@ namespace MacUI
                 BorderBrush = Theme.B(Theme.DockBorder),
                 BorderThickness = new Thickness(1)
             };
-            // Almost-transparent background so the mouse is still tracked above small icons.
+            // Almost-transparent background as tall as a hovered icon, so the mouse stays "on" an icon while it grows.
             panel = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
                 VerticalAlignment = VerticalAlignment.Bottom,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, BottomGap + Pad),
+                MinHeight = HoverSize,
                 Background = Theme.B(Color.FromArgb(1, 0, 0, 0))
             };
             panel.SizeChanged += (s, e) => background.Width = panel.ActualWidth + Pad * 2;
@@ -144,12 +143,7 @@ namespace MacUI
             root.Children.Add(overlay);
             Content = root;
 
-            root.MouseMove += (s, e) => Magnify(e.GetPosition(root).X);
-            root.MouseLeave += (s, e) =>
-            {
-                hovered = null;
-                Magnify(double.NaN);
-            };
+            root.MouseLeave += (s, e) => ClearHover();
 
             SourceInitialized += (s, e) =>
             {
@@ -182,7 +176,7 @@ namespace MacUI
         public void Reposition()
         {
             Width = SystemParameters.PrimaryScreenWidth;
-            Height = MaxSize + Pad + BottomGap + 44;
+            Height = HoverSize + Pad + BottomGap + 44;
             Left = 0;
             Top = SystemParameters.PrimaryScreenHeight - Height;
         }
@@ -212,7 +206,7 @@ namespace MacUI
             if (PresentationSource.FromVisual(background) == null) return false;
             Point topLeft = background.PointToScreen(new Point(0, 0));
             double right = topLeft.X + background.ActualWidth * s;
-            double top = topLeft.Y - (MaxSize - BaseSize + 10) * s; // room for magnified icons
+            double top = topLeft.Y - (HoverSize - BaseSize + 10) * s; // room for a hovered icon
             return p.X >= topLeft.X && p.X <= right && p.Y >= top;
         }
 
@@ -229,8 +223,7 @@ namespace MacUI
         void Conceal()
         {
             revealed = false;
-            hovered = null;
-            Magnify(double.NaN);
+            ClearHover();
             Slide(HiddenOffset, 220);
         }
 
@@ -330,16 +323,11 @@ namespace MacUI
         void Rebuild()
         {
             panel.Children.Clear();
-            double x = 0;
             foreach (DockItem item in entries)
             {
                 EnsureView(item);
                 panel.Children.Add(item.View);
-                double width = item.Kind == "separator" ? SepWidth : BaseSize + Spacing;
-                item.BaseCenter = x + width / 2;
-                x += width;
             }
-            totalBaseWidth = x;
             if (hovered != null && !entries.Contains(hovered)) hovered = null;
             UpdateLabel();
         }
@@ -356,7 +344,6 @@ namespace MacUI
                 return;
             }
 
-            item.Size = item.TargetSize = BaseSize;
             var view = new NamedGrid
             {
                 Width = BaseSize,
@@ -365,8 +352,14 @@ namespace MacUI
                 VerticalAlignment = VerticalAlignment.Bottom,
                 Background = Brushes.Transparent
             };
+            // Grows from its bottom edge when hovered, without moving the other icons.
+            item.Grow = new ScaleTransform(1, 1);
             item.Bounce = new TranslateTransform();
-            view.RenderTransform = item.Bounce;
+            var transforms = new TransformGroup();
+            transforms.Children.Add(item.Grow);
+            transforms.Children.Add(item.Bounce);
+            view.RenderTransform = transforms;
+            view.RenderTransformOrigin = new Point(0.5, 1);
             view.Children.Add(CreateIcon(item));
 
             var dot = new Ellipse
@@ -385,11 +378,14 @@ namespace MacUI
 
             view.MouseEnter += (s, e) =>
             {
+                if (hovered != null && hovered != item) GrowIcon(hovered, false);
                 hovered = item;
+                GrowIcon(item, true);
                 UpdateLabel();
             };
             view.MouseLeave += (s, e) =>
             {
+                GrowIcon(item, false);
                 if (hovered != item) return;
                 hovered = null;
                 UpdateLabel();
@@ -456,47 +452,24 @@ namespace MacUI
             return new Viewbox { Child = new Border { Padding = new Thickness(4), Child = tile } };
         }
 
-        // ---------- magnification ----------
+        // ---------- hover ----------
 
-        void Magnify(double mouseX)
+        // Smoothly grows the icon under the cursor and shrinks it back when the cursor leaves.
+        static void GrowIcon(DockItem item, bool grow)
         {
-            double offset = (root.ActualWidth - totalBaseWidth) / 2;
-            foreach (DockItem item in entries)
-            {
-                if (item.Kind == "separator") continue;
-                double factor = 0;
-                if (!double.IsNaN(mouseX))
-                {
-                    double distance = Math.Abs(mouseX - (offset + item.BaseCenter));
-                    if (distance < Range) factor = (Math.Cos(Math.PI * distance / Range) + 1) / 2;
-                }
-                item.TargetSize = BaseSize + (MaxSize - BaseSize) * factor;
-            }
-            if (animating) return;
-            animating = true;
-            CompositionTarget.Rendering += OnRendering;
+            if (item.Grow == null) return;
+            double to = grow ? HoverScale : 1;
+            var duration = TimeSpan.FromMilliseconds(grow ? 140 : 180);
+            var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+            item.Grow.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(to, duration) { EasingFunction = ease });
+            item.Grow.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(to, duration) { EasingFunction = ease });
         }
 
-        void OnRendering(object sender, EventArgs e)
+        void ClearHover()
         {
-            bool busy = false;
-            foreach (DockItem item in entries)
-            {
-                if (item.Kind == "separator" || item.View == null) continue;
-                double diff = item.TargetSize - item.Size;
-                if (Math.Abs(diff) > 0.25)
-                {
-                    item.Size += diff * 0.35;
-                    busy = true;
-                }
-                else item.Size = item.TargetSize;
-                item.View.Width = item.Size;
-                item.View.Height = item.Size;
-            }
+            if (hovered != null) GrowIcon(hovered, false);
+            hovered = null;
             UpdateLabel();
-            if (busy) return;
-            CompositionTarget.Rendering -= OnRendering;
-            animating = false;
         }
 
         void UpdateLabel()
@@ -509,9 +482,10 @@ namespace MacUI
             labelText.Text = hovered.Name;
             label.Visibility = Visibility.Visible;
             label.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            Point top = hovered.View.TranslatePoint(new Point(hovered.View.Width / 2, 0), root);
-            Canvas.SetLeft(label, top.X - label.DesiredSize.Width / 2);
-            Canvas.SetTop(label, top.Y - label.DesiredSize.Height - 10);
+            // Above the icon's grown size (the bottom edge stays put while it grows).
+            Point bottom = hovered.View.TranslatePoint(new Point(hovered.View.Width / 2, hovered.View.Height), root);
+            Canvas.SetLeft(label, bottom.X - label.DesiredSize.Width / 2);
+            Canvas.SetTop(label, bottom.Y - HoverSize - label.DesiredSize.Height - 8);
         }
 
         void BounceIcon(DockItem item)

@@ -5,7 +5,7 @@ Makes Windows 11 look and behave like macOS while it runs, and puts everything b
 ## Features
 
 - **Menu bar** across the top: Apple menu (About, System Settings, Sleep, Restart, Shut Down, Lock, Quit), the active app's name, File/Edit/View/Window/Help, battery, Wi-Fi, volume, Spotlight, Control Center and clock.
-- **Dock** that hides itself and slides up when the mouse touches the bottom edge: pinned and running apps, icon magnification, bounce on launch, running dots, and the Trash.
+- **Dock** that hides itself and slides up when the mouse touches the bottom edge: pinned and running apps, icons that grow when you point at them, bounce on launch, running dots, and the Trash.
 - **Window buttons**: red / yellow / green buttons at the top-right of every window. Windows' own buttons are removed (normal apps) or covered (apps that draw their own title bar). Background windows show grey buttons that light up on hover.
 - **Genie animation** when minimizing into the Dock and when restoring from it.
 - **App switcher** (Alt+Tab) with big app icons. While open: Tab / arrows move, ↓ shows the app's windows, Q quits the app, Esc cancels.
