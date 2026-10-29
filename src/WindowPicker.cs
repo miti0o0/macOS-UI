@@ -48,10 +48,17 @@ namespace MacUI
         {
             if (Current != null) Current.Dismiss();
             if (windows.Count == 0) return;
-            Current = new WindowPicker(windows, anchor);
-            Current.Show();
-            WindowTracker.Activate(Current.hwnd);
-            Current.Activate();
+            var picker = new WindowPicker(windows, anchor);
+            Current = picker;
+            picker.Show();
+            picker.TakeFocus();
+        }
+
+        void TakeFocus()
+        {
+            if (closing) return;
+            WindowTracker.Activate(hwnd);
+            if (!closing) Activate();
         }
 
         WindowPicker(IList<IntPtr> windows, Rect anchor)
@@ -101,7 +108,14 @@ namespace MacUI
                 Position();
                 Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(UpdateThumbs));
             };
-            Deactivated += (s, e) => Dismiss();
+            // Opened from the app switcher, focus can bounce for a moment while Alt is released; take it back
+            // instead of closing, and only close on deactivation after that.
+            DateTime openedAt = DateTime.Now;
+            Deactivated += (s, e) =>
+            {
+                if (DateTime.Now - openedAt > TimeSpan.FromMilliseconds(600)) Dismiss();
+                else Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(TakeFocus));
+            };
             PreviewKeyDown += OnKey;
             Closed += (s, e) =>
             {

@@ -42,6 +42,15 @@ namespace MacUI
         }
     }
 
+    // A Grid that shows up (with its name) in UI Automation, so screen readers and tests can find Dock icons.
+    internal sealed class NamedGrid : Grid
+    {
+        protected override System.Windows.Automation.Peers.AutomationPeer OnCreateAutomationPeer()
+        {
+            return new System.Windows.Automation.Peers.FrameworkElementAutomationPeer(this);
+        }
+    }
+
     // The macOS-style Dock: pinned apps, running apps, magnification and the Trash.
     // It hides itself and slides up when the mouse touches the bottom of the screen.
     internal sealed class DockWindow : Window
@@ -348,7 +357,7 @@ namespace MacUI
             }
 
             item.Size = item.TargetSize = BaseSize;
-            var view = new Grid
+            var view = new NamedGrid
             {
                 Width = BaseSize,
                 Height = BaseSize,
@@ -385,6 +394,7 @@ namespace MacUI
                 hovered = null;
                 UpdateLabel();
             };
+            System.Windows.Automation.AutomationProperties.SetName(view, item.Name); // lets tests and screen readers find icons
             view.MouseLeftButtonUp += (s, e) => OnClick(item);
             view.MouseRightButtonUp += (s, e) =>
             {

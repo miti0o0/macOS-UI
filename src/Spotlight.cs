@@ -184,8 +184,9 @@ namespace MacUI
             box.Text = "";
             UpdateResults();
             Show();
+            // Opened from a key press that went to another app, so Windows needs the stronger way to hand over focus.
+            WindowTracker.Activate(handle);
             Activate();
-            Native.SetForegroundWindow(handle);
             box.Focus();
             Keyboard.Focus(box);
         }

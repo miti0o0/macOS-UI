@@ -31,6 +31,7 @@ namespace MacUI
         List<Entry> entries = new List<Entry>();
         int selected;
         bool open;
+        bool winDown, winUsedInShortcut;
 
         public AppSwitcher()
         {
@@ -93,16 +94,37 @@ namespace MacUI
             {
                 var key = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(Native.KBDLLHOOKSTRUCT));
                 int message = wParam.ToInt32();
-                if (HandleKey(key.vkCode, key.flags, message == Native.WM_KEYDOWN || message == Native.WM_SYSKEYDOWN))
+                if (HandleKey(key.vkCode, key.flags, message == Native.WM_KEYDOWN || message == Native.WM_SYSKEYDOWN,
+                              new UIntPtr((ulong)key.dwExtraInfo.ToInt64())))
                     return (IntPtr)1; // swallow the key
             }
             return Native.CallNextHookEx(hook, code, wParam, lParam);
         }
 
         // Runs inside the keyboard hook, so it must decide quickly; UI work is queued.
-        bool HandleKey(uint vk, uint flags, bool down)
+        bool HandleKey(uint vk, uint flags, bool down, UIntPtr extraInfo)
         {
-            if (vk == Native.VK_UNASSIGNED) return false;
+            if (vk == Native.VK_UNASSIGNED || extraInfo == Native.OwnInputTag) return false;
+
+            // Tapping the Windows key on its own opens Spotlight instead of the Start menu.
+            // Windows-key shortcuts (Win+E, Win+R, Win+D...) still work as usual.
+            if (vk == Native.VK_LWIN || vk == Native.VK_RWIN)
+            {
+                if (down)
+                {
+                    if (!winDown) winUsedInShortcut = false;
+                    winDown = true;
+                    return false;
+                }
+                winDown = false;
+                if (winUsedInShortcut) return false;
+                // Swallow this release and replay it after a harmless key, which tells Windows not to open Start.
+                Native.SendKeys((byte)Native.VK_UNASSIGNED);
+                Native.KeyUp((byte)vk);
+                Dispatcher.BeginInvoke(new Action(() => App.Spotlight.Toggle()));
+                return true;
+            }
+            if (winDown && down) winUsedInShortcut = true;
 
             // Alt+` switches between the windows of the app you are in (Cmd+` on a Mac).
             if (vk == Native.VK_BACKTICK && !open && (flags & Native.LLKHF_ALTDOWN) != 0)

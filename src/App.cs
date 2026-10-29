@@ -76,7 +76,7 @@ namespace MacUI
             Decorations.Start();
             WindowEvents.Install();
 
-            var keepHidden = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+            var keepHidden = new DispatcherTimer { Interval = TimeSpan.FromSeconds(0.5) };
             keepHidden.Tick += (s, e) =>
             {
                 Taskbar.KeepHidden();

@@ -97,13 +97,26 @@ namespace MacUI
             return sb.ToString();
         }
 
+        // Marks key presses MacUI makes itself, so its own keyboard hook can ignore them.
+        public static readonly UIntPtr OwnInputTag = new UIntPtr(0x4D414355);
+
         // Presses the keys in order, then releases them in reverse order.
         public static void SendKeys(params byte[] keys)
         {
             foreach (byte key in keys)
-                keybd_event(key, 0, key == VK_LWIN ? 1u : 0u, UIntPtr.Zero);
+                keybd_event(key, 0, IsExtended(key) ? 1u : 0u, OwnInputTag);
             for (int i = keys.Length - 1; i >= 0; i--)
-                keybd_event(keys[i], 0, (keys[i] == VK_LWIN ? 1u : 0u) | 2u, UIntPtr.Zero);
+                KeyUp(keys[i]);
+        }
+
+        public static void KeyUp(byte key)
+        {
+            keybd_event(key, 0, (IsExtended(key) ? 1u : 0u) | 2u, OwnInputTag);
+        }
+
+        static bool IsExtended(byte key)
+        {
+            return key == VK_LWIN || key == 0x5C;
         }
     }
 

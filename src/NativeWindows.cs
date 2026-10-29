@@ -82,7 +82,7 @@ namespace MacUI
         public const int WM_KEYDOWN = 0x100, WM_SYSKEYDOWN = 0x104;
         public const uint LLKHF_ALTDOWN = 0x20;
         public const uint VK_TAB = 0x09, VK_SHIFT = 0x10, VK_ESCAPE = 0x1B, VK_LEFT = 0x25, VK_RIGHT = 0x27, VK_DOWN = 0x28,
-                          VK_BACKTICK = 0xC0,
+                          VK_BACKTICK = 0xC0, VK_RWIN = 0x5C,
                           VK_LMENU = 0xA4, VK_RMENU = 0xA5, VK_UNASSIGNED = 0xE8;
 
         [DllImport("user32.dll")] public static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WinEventDelegate proc, uint pid, uint tid, uint flags);

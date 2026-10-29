@@ -175,6 +175,7 @@ namespace MacUI
         {
             public bool Found;
             public int FrameWidth;
+            public DateTime Time = DateTime.Now;
             public int FromRight, FromTop, Height; // where the app's own buttons are, relative to the window frame
         }
 
@@ -206,23 +207,42 @@ namespace MacUI
             return exePath != null && excluded.Contains(Path.GetFileName(exePath));
         }
 
+        static bool refreshing;
+
         public static void Refresh()
+        {
+            // Showing or closing a WPF window pumps messages, so window events can arrive in the middle of a
+            // refresh. Running a second refresh inside the first one used to create duplicate buttons for a window.
+            if (refreshing)
+            {
+                RefreshSoon();
+                return;
+            }
+            refreshing = true;
+            try { RefreshNow(); }
+            finally { refreshing = false; }
+        }
+
+        static void RefreshNow()
         {
             IntPtr foreground = Native.GetAncestor(Native.GetForegroundWindow(), Native.GA_ROOTOWNER);
             var alive = new HashSet<IntPtr>();
             foreach (AppWindow window in WindowTracker.GetAppWindows())
             {
                 IntPtr h = window.Handle;
-                if (IsExcluded(window.ExePath) || Native.IsIconic(h) || TrafficLights.IsFullscreen(h)) continue;
+                if (IsExcluded(window.ExePath) || Native.IsIconic(h)) continue;
+                // Fills the whole monitor: a full-screen game/video gets no buttons, but a maximized browser on a
+                // monitor without taskbar looks the same, so only skip it when its own title-bar buttons aren't showing.
+                if (TrafficLights.IsFullscreen(h) && !ShowsOwnButtons(h)) continue;
                 alive.Add(h);
                 CaptionButtons.Strip(h);
                 Decoration decoration;
                 if (!decorations.TryGetValue(h, out decoration))
                 {
                     decoration = new Decoration { Lights = new TrafficLights(h, window.ExePath), Cover = new ButtonCover(h) };
+                    decorations[h] = decoration; // registered before Show(), which can pump messages
                     decoration.Cover.Show();
                     decoration.Lights.Show();
-                    decorations[h] = decoration;
                 }
                 decoration.Lights.SetActive(h == foreground);
                 Place(h, decoration);
@@ -286,6 +306,14 @@ namespace MacUI
         static void Place(IntPtr h, Decoration decoration)
         {
             Native.RECT frame = Native.GetFrame(h);
+            if (Native.IsZoomed(h))
+            {
+                // Windows reports maximized windows a few pixels past the usable screen area (under the menu bar).
+                Native.RECT work = Native.GetMonitor(h).rcWork;
+                frame.Left = Math.Max(frame.Left, work.Left);
+                frame.Top = Math.Max(frame.Top, work.Top);
+                frame.Right = Math.Min(frame.Right, work.Right);
+            }
             double s = Dpi.Scale;
             // Just below the Dock in the "always on top" layer, so the Dock and menus stay above them.
             IntPtr after = App.Dock != null && App.Dock.Handle != IntPtr.Zero ? App.Dock.Handle : Native.HWND_TOPMOST;
@@ -339,11 +367,24 @@ namespace MacUI
             return true;
         }
 
+        static bool ShowsOwnButtons(IntPtr h)
+        {
+            // Re-checked every 2 s: going in and out of a full-screen video doesn't change the window's size.
+            Probe probe = EnsureProbe(h, Native.GetFrame(h), TimeSpan.FromSeconds(2));
+            return probe != null && probe.Found;
+        }
+
         static Probe EnsureProbe(IntPtr h, Native.RECT frame)
+        {
+            return EnsureProbe(h, frame, TimeSpan.MaxValue);
+        }
+
+        static Probe EnsureProbe(IntPtr h, Native.RECT frame, TimeSpan maxAge)
         {
             int width = frame.Right - frame.Left;
             Probe probe;
-            bool fresh = probes.TryGetValue(h, out probe) && probe.FrameWidth == width;
+            bool fresh = probes.TryGetValue(h, out probe) && probe.FrameWidth == width &&
+                         (maxAge == TimeSpan.MaxValue || DateTime.Now - probe.Time < maxAge);
             if (!fresh && !probing.Contains(h))
             {
                 probing.Add(h);
@@ -381,21 +422,7 @@ namespace MacUI
                         r.Right > frame.Right - 400 * s) candidates.Add(r);
                 }
 
-                var row = new List<Rect>();
-                foreach (Rect r in candidates.OrderByDescending(r => r.Right))
-                {
-                    if (row.Count == 0)
-                    {
-                        if (r.Right < frame.Right - 4 * s) break; // the row must touch the right edge
-                        row.Add(r);
-                        continue;
-                    }
-                    Rect previous = row[row.Count - 1];
-                    if (previous.Left - r.Right > 8 * s || Math.Abs(previous.Top - r.Top) > 4 * s ||
-                        Math.Abs(previous.Height - r.Height) > 4 * s) break;
-                    row.Add(r);
-                    if (row.Count == 3) break;
-                }
+                List<Rect> row = FindButtonRow(candidates, frame.Right, s);
                 if (row.Count < 2) return probe;
 
                 probe.Found = true;
@@ -408,6 +435,32 @@ namespace MacUI
                 App.Log(ex);
             }
             return probe;
+        }
+
+        // Starting at the right edge, chains leftwards through same-sized neighbours (close, maximize, minimize).
+        // Other buttons nearby (a panel's own "Close", toolbar icons) are skipped, and when an app reports
+        // the same button twice (Firefox does, in two heights) the tallest one wins.
+        public static List<Rect> FindButtonRow(List<Rect> candidates, double frameRight, double s)
+        {
+            var row = new List<Rect>();
+            var first = candidates.Where(r => r.Right >= frameRight - 4 * s)
+                                  .OrderByDescending(r => r.Right).ThenByDescending(r => r.Height).ToList();
+            if (first.Count == 0) return row;
+            row.Add(first[0]);
+
+            while (row.Count < 3)
+            {
+                Rect previous = row[row.Count - 1];
+                var next = candidates.Where(r =>
+                        Math.Abs(r.Right - previous.Left) <= 8 * s &&
+                        Math.Abs(r.Top - previous.Top) <= 4 * s &&
+                        Math.Abs(r.Height - previous.Height) <= 4 * s &&
+                        Math.Abs(r.Width - previous.Width) <= 6 * s)
+                    .OrderByDescending(r => r.Height).ToList();
+                if (next.Count == 0) break;
+                row.Add(next[0]);
+            }
+            return row;
         }
 
         // ---------- per-app opt-out ----------
