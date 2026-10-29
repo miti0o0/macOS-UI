@@ -1,0 +1,435 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Threading;
+
+namespace MacUI
+{
+    // Removes Windows' own minimize / maximize / close buttons from normal title bars
+    // by switching off the window's system menu (put back when MacUI quits).
+    internal static class CaptionButtons
+    {
+        static readonly HashSet<IntPtr> stripped = new HashSet<IntPtr>();
+        static readonly HashSet<IntPtr> seen = new HashSet<IntPtr>();
+        static readonly Dictionary<IntPtr, int> captionHeights = new Dictionary<IntPtr, int>();
+
+        // Browsers and Electron apps draw their own buttons; those get a ButtonCover instead.
+        public static bool DrawsOwnTitleBar(IntPtr h)
+        {
+            string cls = Native.GetClassName(h);
+            return cls.StartsWith("Chrome_WidgetWin_") || cls == "MozillaWindowClass" || cls == "CASCADIA_HOSTING_WINDOW_CLASS";
+        }
+
+        public static void Sweep(Func<string, bool> isExcluded)
+        {
+            foreach (AppWindow window in WindowTracker.GetAppWindows())
+                if (!isExcluded(window.ExePath)) Strip(window.Handle);
+            seen.RemoveWhere(h => !Native.IsWindow(h));
+            stripped.RemoveWhere(h => !Native.IsWindow(h));
+            foreach (IntPtr h in captionHeights.Keys.Where(h => !Native.IsWindow(h)).ToList()) captionHeights.Remove(h);
+        }
+
+        public static void Strip(IntPtr h)
+        {
+            if (!seen.Add(h) || DrawsOwnTitleBar(h)) return;
+            int style = Native.GetWindowLong(h, Native.GWL_STYLE);
+            if ((style & Native.WS_SYSMENU) == 0) return;
+
+            // Remember how tall the old buttons were, so the new ones sit in the middle of the title bar.
+            Native.RECT bounds;
+            if (Native.DwmGetWindowAttribute(h, Native.DWMWA_CAPTION_BUTTON_BOUNDS, out bounds, 16) == 0 && bounds.Bottom > bounds.Top)
+                captionHeights[h] = bounds.Bottom - bounds.Top;
+
+            Native.SetWindowLong(h, Native.GWL_STYLE, style & ~Native.WS_SYSMENU);
+            Redraw(h);
+            stripped.Add(h);
+        }
+
+        public static void Unstrip(IntPtr h)
+        {
+            seen.Remove(h);
+            if (!stripped.Remove(h) || !Native.IsWindow(h)) return;
+            Native.SetWindowLong(h, Native.GWL_STYLE, Native.GetWindowLong(h, Native.GWL_STYLE) | Native.WS_SYSMENU);
+            Redraw(h);
+        }
+
+        public static void RestoreAll()
+        {
+            foreach (IntPtr h in stripped.ToList()) Unstrip(h);
+            seen.Clear();
+        }
+
+        public static int CaptionHeight(IntPtr h)
+        {
+            int height;
+            return captionHeights.TryGetValue(h, out height) ? height : (int)Math.Round(32 * Dpi.Scale);
+        }
+
+        static void Redraw(IntPtr h)
+        {
+            Native.SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0,
+                Native.SWP_FRAMECHANGED | Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+        }
+    }
+
+    // A patch in the title bar's own color, laid over buttons that apps draw themselves.
+    internal sealed class ButtonCover : Window
+    {
+        readonly IntPtr target;
+        readonly Border patch;
+        IntPtr hwnd;
+
+        public ButtonCover(IntPtr target)
+        {
+            this.target = target;
+            Title = "MacUI Button Cover";
+            WindowStyle = WindowStyle.None;
+            AllowsTransparency = true;
+            Background = Brushes.Transparent;
+            ShowInTaskbar = false;
+            ShowActivated = false;
+            ResizeMode = ResizeMode.NoResize;
+            Left = -32000;
+            Top = -32000;
+            Width = 10;
+            Height = 10;
+
+            patch = new Border();
+            Content = patch;
+            // The patch still behaves like title bar: drag to move, double-click to zoom.
+            patch.MouseLeftButtonDown += (s, e) =>
+            {
+                if (e.ClickCount == 2) Native.ShowWindowAsync(target, Native.IsZoomed(target) ? Native.SW_RESTORE : Native.SW_MAXIMIZE);
+                else
+                {
+                    WindowTracker.Activate(target);
+                    Native.PostMessage(target, Native.WM_SYSCOMMAND, (IntPtr)Native.SC_DRAGMOVE, IntPtr.Zero);
+                }
+            };
+
+            SourceInitialized += (s, e) =>
+            {
+                hwnd = new WindowInteropHelper(this).Handle;
+                WindowStyles.MakeToolWindow(hwnd, true);
+                Native.SetDwmInt(hwnd, Native.DWMWA_TRANSITIONS_FORCEDISABLED, 1);
+            };
+        }
+
+        public void Park()
+        {
+            if (hwnd != IntPtr.Zero)
+                Native.SetWindowPos(hwnd, IntPtr.Zero, -32000, -32000, 0, 0, Native.SWP_NOSIZE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+        }
+
+        public void PlaceAt(Native.RECT me, IntPtr insertAfter)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            Color? color = SampleTitleBar(me.Left - (int)Math.Round(5 * Dpi.Scale), (me.Top + me.Bottom) / 2);
+            if (color == null)
+            {
+                Park();
+                return;
+            }
+            patch.Background = Theme.B(color.Value);
+            patch.CornerRadius = new CornerRadius(0, Native.IsZoomed(target) ? 0 : 8, 0, 0);
+            Native.SetWindowPos(hwnd, insertAfter, me.Left, me.Top, me.Right - me.Left, me.Bottom - me.Top, Native.SWP_NOACTIVATE);
+        }
+
+        static Color? SampleTitleBar(int x, int y)
+        {
+            IntPtr dc = Native.GetDC(IntPtr.Zero);
+            try
+            {
+                uint c = Native.GetPixel(dc, x, y);
+                if (c == 0xFFFFFFFF) return null;
+                return Color.FromRgb((byte)(c & 0xFF), (byte)((c >> 8) & 0xFF), (byte)((c >> 16) & 0xFF));
+            }
+            finally
+            {
+                Native.ReleaseDC(IntPtr.Zero, dc);
+            }
+        }
+    }
+
+    // Gives every app window macOS buttons at its top-right corner and hides Windows' own buttons.
+    internal static class Decorations
+    {
+        sealed class Decoration
+        {
+            public TrafficLights Lights;
+            public ButtonCover Cover;
+        }
+
+        sealed class Probe
+        {
+            public bool Found;
+            public int FrameWidth;
+            public int FromRight, FromTop, Height; // where the app's own buttons are, relative to the window frame
+        }
+
+        static string ExcludePath { get { return Path.Combine(App.DataDir, "no-window-buttons.txt"); } }
+
+        static readonly Dictionary<IntPtr, Decoration> decorations = new Dictionary<IntPtr, Decoration>();
+        static readonly Dictionary<IntPtr, Probe> probes = new Dictionary<IntPtr, Probe>();
+        static readonly HashSet<IntPtr> probing = new HashSet<IntPtr>();
+        static readonly HashSet<string> excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        static Dispatcher dispatcher;
+
+        public static void Start()
+        {
+            dispatcher = Dispatcher.CurrentDispatcher;
+            LoadExcluded();
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            timer.Tick += (s, e) => Refresh();
+            timer.Start();
+            Refresh();
+        }
+
+        public static void Stop()
+        {
+            foreach (IntPtr h in decorations.Keys.ToList()) Remove(h);
+        }
+
+        public static bool IsExcluded(string exePath)
+        {
+            return exePath != null && excluded.Contains(Path.GetFileName(exePath));
+        }
+
+        public static void Refresh()
+        {
+            IntPtr foreground = Native.GetAncestor(Native.GetForegroundWindow(), Native.GA_ROOTOWNER);
+            var alive = new HashSet<IntPtr>();
+            foreach (AppWindow window in WindowTracker.GetAppWindows())
+            {
+                IntPtr h = window.Handle;
+                if (IsExcluded(window.ExePath) || Native.IsIconic(h) || TrafficLights.IsFullscreen(h)) continue;
+                alive.Add(h);
+                Decoration decoration;
+                if (!decorations.TryGetValue(h, out decoration))
+                {
+                    CaptionButtons.Strip(h);
+                    decoration = new Decoration { Lights = new TrafficLights(h, window.ExePath), Cover = new ButtonCover(h) };
+                    decoration.Cover.Show();
+                    decoration.Lights.Show();
+                    decorations[h] = decoration;
+                }
+                decoration.Lights.SetActive(h == foreground);
+                Place(h, decoration);
+            }
+            foreach (IntPtr h in decorations.Keys.Where(h => !alive.Contains(h)).ToList()) Remove(h);
+        }
+
+        public static void OnMoved(IntPtr h)
+        {
+            Decoration decoration;
+            if (!decorations.TryGetValue(h, out decoration)) return;
+            if (Native.IsIconic(h) || !Native.IsWindowVisible(h)) Park(decoration);
+            else Place(h, decoration);
+        }
+
+        public static void OnGone(IntPtr h)
+        {
+            Decoration decoration;
+            if (decorations.TryGetValue(h, out decoration)) Park(decoration);
+        }
+
+        public static void OnDestroyed(IntPtr h)
+        {
+            Remove(h);
+            probes.Remove(h);
+        }
+
+        static void Remove(IntPtr h)
+        {
+            Decoration decoration;
+            if (!decorations.TryGetValue(h, out decoration)) return;
+            decorations.Remove(h);
+            decoration.Lights.Close();
+            decoration.Cover.Close();
+        }
+
+        static void Park(Decoration decoration)
+        {
+            decoration.Lights.Park();
+            decoration.Cover.Park();
+        }
+
+        static void Place(IntPtr h, Decoration decoration)
+        {
+            Native.RECT frame = Native.GetFrame(h);
+            double s = Dpi.Scale;
+            // Just below the Dock in the "always on top" layer, so the Dock and menus stay above them.
+            IntPtr after = App.Dock != null && App.Dock.Handle != IntPtr.Zero ? App.Dock.Handle : Native.HWND_TOPMOST;
+
+            int centerY;
+            Native.RECT cover;
+            if (FindOwnButtons(h, frame, out cover))
+            {
+                if (TrafficLights.IsCovered(h, cover)) decoration.Cover.Park();
+                else decoration.Cover.PlaceAt(cover, after);
+                centerY = (cover.Top + cover.Bottom) / 2;
+            }
+            else
+            {
+                decoration.Cover.Park();
+                centerY = frame.Top + CaptionButtons.CaptionHeight(h) / 2;
+            }
+
+            int width = (int)Math.Round(decoration.Lights.Width * s), height = (int)Math.Round(decoration.Lights.Height * s);
+            var me = new Native.RECT { Left = frame.Right - width - (int)Math.Round(6 * s), Top = centerY - height / 2 };
+            me.Right = me.Left + width;
+            me.Bottom = me.Top + height;
+            if (TrafficLights.IsCovered(h, me)) decoration.Lights.Park();
+            else decoration.Lights.MoveTo(me.Left, me.Top, after);
+        }
+
+        // ---------- finding buttons that apps draw themselves ----------
+
+        // Screen area of the app's own minimize/maximize/close buttons, if it draws them itself.
+        static bool FindOwnButtons(IntPtr h, Native.RECT frame, out Native.RECT cover)
+        {
+            double s = Dpi.Scale;
+            cover = new Native.RECT { Top = frame.Top, Right = frame.Right };
+
+            // Best source: the exact buttons, from UI Automation.
+            Probe probe = EnsureProbe(h, frame);
+            if (probe != null && probe.Found)
+            {
+                cover.Left = frame.Right - probe.FromRight - (int)Math.Round(2 * s);
+                cover.Bottom = frame.Top + probe.FromTop + probe.Height;
+                return true;
+            }
+
+            // Fallback for apps like Windows Terminal: where Windows says the caption buttons are.
+            if (!CaptionButtons.DrawsOwnTitleBar(h)) return false;
+            Native.RECT bounds, window;
+            if (Native.DwmGetWindowAttribute(h, Native.DWMWA_CAPTION_BUTTON_BOUNDS, out bounds, 16) != 0 ||
+                bounds.Right - bounds.Left < 20 || !Native.GetWindowRect(h, out window)) return false;
+            cover.Left = window.Left + bounds.Left - (int)Math.Round(2 * s);
+            cover.Bottom = window.Top + bounds.Bottom;
+            return true;
+        }
+
+        static Probe EnsureProbe(IntPtr h, Native.RECT frame)
+        {
+            int width = frame.Right - frame.Left;
+            Probe probe;
+            bool fresh = probes.TryGetValue(h, out probe) && probe.FrameWidth == width;
+            if (!fresh && !probing.Contains(h))
+            {
+                probing.Add(h);
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    Probe result = FindButtons(h, frame);
+                    dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        probing.Remove(h);
+                        probes[h] = result;
+                        OnMoved(h);
+                    }));
+                });
+            }
+            return probe;
+        }
+
+        // Finds the row of 2-3 equal buttons flush with the window's top-right corner.
+        static Probe FindButtons(IntPtr h, Native.RECT frame)
+        {
+            var probe = new Probe { FrameWidth = frame.Right - frame.Left };
+            try
+            {
+                double s = Dpi.Scale;
+                AutomationElement window = AutomationElement.FromHandle(h);
+                var condition = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
+                var candidates = new List<Rect>();
+                foreach (AutomationElement button in window.FindAll(TreeScope.Descendants, condition))
+                {
+                    Rect r = button.Current.BoundingRectangle;
+                    if (r.IsEmpty || r.Width < 8 || r.Height < 8) continue;
+                    // Only buttons inside the title strip (scrolled-away content can report positions far above the window).
+                    if (r.Top >= frame.Top - 2 && r.Bottom <= frame.Top + 80 * s && r.Right > frame.Right - 400 * s) candidates.Add(r);
+                }
+
+                var row = new List<Rect>();
+                foreach (Rect r in candidates.OrderByDescending(r => r.Right))
+                {
+                    if (row.Count == 0)
+                    {
+                        if (r.Right < frame.Right - 4 * s) break; // the row must touch the right edge
+                        row.Add(r);
+                        continue;
+                    }
+                    Rect previous = row[row.Count - 1];
+                    if (previous.Left - r.Right > 8 * s || Math.Abs(previous.Top - r.Top) > 4 * s ||
+                        Math.Abs(previous.Height - r.Height) > 4 * s) break;
+                    row.Add(r);
+                    if (row.Count == 3) break;
+                }
+                if (row.Count < 2) return probe;
+
+                probe.Found = true;
+                probe.FromRight = frame.Right - (int)Math.Floor(row.Min(r => r.Left));
+                probe.FromTop = (int)Math.Floor(row.Min(r => r.Top)) - frame.Top;
+                probe.Height = (int)Math.Ceiling(row.Max(r => r.Bottom) - row.Min(r => r.Top));
+            }
+            catch (Exception ex)
+            {
+                App.Log(ex);
+            }
+            return probe;
+        }
+
+        // ---------- per-app opt-out ----------
+
+        public static void ShowAppMenu(FrameworkElement anchor, string exePath)
+        {
+            var menu = new ContextMenu { PlacementTarget = anchor, Placement = PlacementMode.Bottom };
+            Menus.Add(menu, "Use Windows buttons in " + AppInfo.DisplayName(exePath), () =>
+            {
+                excluded.Add(Path.GetFileName(exePath));
+                SaveExcluded();
+                foreach (AppWindow w in WindowTracker.GetAppWindows())
+                    if (string.Equals(w.ExePath, exePath, StringComparison.OrdinalIgnoreCase)) CaptionButtons.Unstrip(w.Handle);
+                Refresh();
+            });
+            if (excluded.Count > 0)
+                Menus.Add(menu, "Use macOS buttons in all apps again", () =>
+                {
+                    excluded.Clear();
+                    SaveExcluded();
+                    Refresh();
+                });
+            menu.IsOpen = true;
+        }
+
+        static void LoadExcluded()
+        {
+            try
+            {
+                if (!File.Exists(ExcludePath)) return;
+                foreach (string line in File.ReadAllLines(ExcludePath))
+                    if (line.Trim().Length > 0 && !line.StartsWith("#")) excluded.Add(line.Trim());
+            }
+            catch (Exception ex) { App.Log(ex); }
+        }
+
+        static void SaveExcluded()
+        {
+            try
+            {
+                var lines = new List<string> { "# Apps (process names) that keep the normal Windows buttons." };
+                lines.AddRange(excluded.OrderBy(x => x));
+                File.WriteAllLines(ExcludePath, lines);
+            }
+            catch (Exception ex) { App.Log(ex); }
+        }
+    }
+}
