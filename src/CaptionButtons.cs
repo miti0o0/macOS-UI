@@ -37,15 +37,17 @@ namespace MacUI
             foreach (IntPtr h in captionHeights.Keys.Where(h => !Native.IsWindow(h)).ToList()) captionHeights.Remove(h);
         }
 
+        // Safe to call repeatedly: some apps switch their system menu back on (e.g. when maximized),
+        // so this is checked again on every refresh.
         public static void Strip(IntPtr h)
         {
-            if (!seen.Add(h) || DrawsOwnTitleBar(h)) return;
+            if (DrawsOwnTitleBar(h)) return;
             int style = Native.GetWindowLong(h, Native.GWL_STYLE);
             if ((style & Native.WS_SYSMENU) == 0) return;
 
             // Remember how tall the old buttons were, so the new ones sit in the middle of the title bar.
             Native.RECT bounds;
-            if (Native.DwmGetWindowAttribute(h, Native.DWMWA_CAPTION_BUTTON_BOUNDS, out bounds, 16) == 0 && bounds.Bottom > bounds.Top)
+            if (seen.Add(h) && Native.DwmGetWindowAttribute(h, Native.DWMWA_CAPTION_BUTTON_BOUNDS, out bounds, 16) == 0 && bounds.Bottom > bounds.Top)
                 captionHeights[h] = bounds.Bottom - bounds.Top;
 
             Native.SetWindowLong(h, Native.GWL_STYLE, style & ~Native.WS_SYSMENU);
@@ -70,7 +72,8 @@ namespace MacUI
         public static int CaptionHeight(IntPtr h)
         {
             int height;
-            return captionHeights.TryGetValue(h, out height) ? height : (int)Math.Round(32 * Dpi.Scale);
+            int minimum = (int)Math.Round(28 * Dpi.Scale);
+            return captionHeights.TryGetValue(h, out height) ? Math.Max(height, minimum) : (int)Math.Round(32 * Dpi.Scale);
         }
 
         static void Redraw(IntPtr h)
@@ -90,7 +93,7 @@ namespace MacUI
         public ButtonCover(IntPtr target)
         {
             this.target = target;
-            Title = "MacUI Button Cover";
+            Title = "MacUI Button Cover " + target;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = Brushes.Transparent;
@@ -212,10 +215,10 @@ namespace MacUI
                 IntPtr h = window.Handle;
                 if (IsExcluded(window.ExePath) || Native.IsIconic(h) || TrafficLights.IsFullscreen(h)) continue;
                 alive.Add(h);
+                CaptionButtons.Strip(h);
                 Decoration decoration;
                 if (!decorations.TryGetValue(h, out decoration))
                 {
-                    CaptionButtons.Strip(h);
                     decoration = new Decoration { Lights = new TrafficLights(h, window.ExePath), Cover = new ButtonCover(h) };
                     decoration.Cover.Show();
                     decoration.Lights.Show();
@@ -233,6 +236,24 @@ namespace MacUI
             if (!decorations.TryGetValue(h, out decoration)) return;
             if (Native.IsIconic(h) || !Native.IsWindowVisible(h)) Park(decoration);
             else Place(h, decoration);
+            // A window that moved or got maximized may now cover (or uncover) other windows' buttons.
+            RefreshSoon();
+        }
+
+        static DispatcherTimer soon;
+
+        static void RefreshSoon()
+        {
+            if (soon == null)
+            {
+                soon = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
+                soon.Tick += (s, e) =>
+                {
+                    soon.Stop();
+                    Refresh();
+                };
+            }
+            if (!soon.IsEnabled) soon.Start();
         }
 
         public static void OnGone(IntPtr h)
@@ -354,8 +375,10 @@ namespace MacUI
                 {
                     Rect r = button.Current.BoundingRectangle;
                     if (r.IsEmpty || r.Width < 8 || r.Height < 8) continue;
-                    // Only buttons inside the title strip (scrolled-away content can report positions far above the window).
-                    if (r.Top >= frame.Top - 2 && r.Bottom <= frame.Top + 80 * s && r.Right > frame.Right - 400 * s) candidates.Add(r);
+                    // Only buttons in the title strip (scrolled-away content can report positions far above the window;
+                    // maximized apps may put their buttons a few pixels above the visible frame).
+                    if (r.Bottom > frame.Top && r.Top >= frame.Top - 16 * s && r.Bottom <= frame.Top + 80 * s &&
+                        r.Right > frame.Right - 400 * s) candidates.Add(r);
                 }
 
                 var row = new List<Rect>();
@@ -377,7 +400,7 @@ namespace MacUI
 
                 probe.Found = true;
                 probe.FromRight = frame.Right - (int)Math.Floor(row.Min(r => r.Left));
-                probe.FromTop = (int)Math.Floor(row.Min(r => r.Top)) - frame.Top;
+                probe.FromTop = Math.Max(0, (int)Math.Floor(row.Min(r => r.Top)) - frame.Top);
                 probe.Height = (int)Math.Ceiling(row.Max(r => r.Bottom) - row.Min(r => r.Top));
             }
             catch (Exception ex)

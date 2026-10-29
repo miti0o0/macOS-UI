@@ -35,7 +35,7 @@ namespace MacUI
         {
             Target = target;
             ExePath = exePath;
-            Title = "MacUI Window Buttons";
+            Title = "MacUI Window Buttons " + target;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = Brushes.Transparent;
