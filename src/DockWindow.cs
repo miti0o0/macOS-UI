@@ -55,7 +55,8 @@ namespace MacUI
     // It hides itself and slides up when the mouse touches the bottom of the screen.
     internal sealed class DockWindow : Window
     {
-        const double BaseSize = 48, HoverScale = 1.35, HoverSize = BaseSize * HoverScale, Spacing = 6, Pad = 7, BottomGap = 6, SepWidth = 13;
+        // Spacing is wider than a hovered icon's growth (BaseSize * 0.3 = ~14px), so it never overlaps its neighbours.
+        const double BaseSize = 48, HoverScale = 1.3, HoverSize = BaseSize * HoverScale, Spacing = 16, Pad = 8, BottomGap = 6, SepWidth = 17;
         const double HiddenOffset = BaseSize + Pad * 2 + BottomGap + 12;
         const string RecycleBin = "::{645FF040-5081-101B-9F08-00AA002F954E}";
 
